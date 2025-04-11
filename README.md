@@ -1,5 +1,24 @@
-run_model.ipynb runs the pretrained model trained us on data from Jan 1 to 22 march 2025. 
-There are two FinGAT notebooks, one uses original FinGAT model and other uses Transformer instead of GRU in FinGAT.
-Preprocess file is to show how we preprocessed data.
+# Stock Ranking Prediction using FinGAT and Transformer Variants
 
-run_model.ipynb includes all the metrics and csv file creation.
+This repository contains code and resources for stock ranking prediction using the FinGAT model and its Transformer-based variant.
+
+📄 **Report Link**: [IEEE-style Project Report](https://www.overleaf.com/read/bckpdknmzhsv#8a4fff)
+
+---
+
+## 🔧 Repository Contents
+
+- **`run_model.ipynb`**  
+  Runs the **pretrained model** trained on stock data from _January 1 to March 22, 2025_.  
+  Includes:  
+  - Evaluation using key metrics (**R²**, **MRR**, **movement accuracy**, etc.)  
+  - CSV file generation for predictions.
+
+- **`FinGAT.ipynb`**  
+  Implementation of the _original **FinGAT**_ model for stock ranking.
+
+- **`FinGAT_Transformer.ipynb`**  
+  Modified version of FinGAT using a **Transformer** instead of a **GRU** for sequential learning.
+
+- **`preprocess.ipynb`**  
+  Demonstrates the **data preprocessing** pipeline used before training the models.
