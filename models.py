@@ -17,6 +17,9 @@ from torch import optim
 from torch.utils.data import Subset
 from collections import defaultdict
 
+
+HIDDEN_SIZE = 16
+
 class HierarchicalStockDataset(Dataset):
     def __init__(self, multiindex_df, sequence_length=5):
         self.sequence_length = sequence_length
@@ -71,41 +74,59 @@ class HierarchicalStockDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-class ShortTermSequentialLearner(nn.Module):
-    def __init__(self, input_size, hidden_size):
+class TransformerSequentialLearner(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers=2, nhead=4, dropout=0.1):
         super().__init__()
-        self.gru = nn.GRU(input_size, hidden_size, batch_first=True)
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size), nn.Tanh(),
-            nn.Linear(hidden_size, 1, bias=False))
-            
+        
+       
+        self.pos_encoder = nn.Parameter(torch.zeros(1, 100, hidden_size)) 
+        
+        self.input_proj = nn.Linear(input_size, hidden_size) if input_size != hidden_size else nn.Identity()
+        
+        encoder_layers = nn.TransformerEncoderLayer(
+            d_model=hidden_size, 
+            nhead=nhead, 
+            dim_feedforward=hidden_size*4,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
+        
+        self.output_proj = nn.Linear(hidden_size, hidden_size)
+        
     def forward(self, x):
-        gru_out, _ = self.gru(x)
-        attn_weights = F.softmax(self.attention(gru_out).squeeze(-1), dim=-1)
-        context = torch.bmm(attn_weights.unsqueeze(1), gru_out).squeeze(1)
-        return context, gru_out
+
+        seq_len = x.size(1)
+        
+        x = self.input_proj(x)
+
+        x = x + self.pos_encoder[:, :seq_len, :]
+        
+        transformer_output = self.transformer_encoder(x)
+        
+
+        context = torch.mean(transformer_output, dim=1)
+        
+        return context, transformer_output
     
 class IntraSectorGAT(torch.nn.Module):
-    def __init__(self, HIDDEN_SIZE=16):
+    def __init__(self, HIDDEN_SIZE=HIDDEN_SIZE):
         super().__init__()
         
         self.model_registry = {}
-        self.out_dim = HIDDEN_SIZE 
+        self.out_dim = HIDDEN_SIZE  
     
     def forward(self, data):
 
         x, edge_index = data.x, data.edge_index
-        
 
         if x.dim() != 2:
             x = x.reshape(-1, x.size(-1))
-        
 
         in_channels = x.size(1)
         
-
         if in_channels not in self.model_registry:
-
+            print(f"Creating new GATConv model for input dimension {in_channels}")
             conv = GATConv(
                 in_channels=in_channels,
                 out_channels=self.out_dim // 4,
@@ -115,7 +136,6 @@ class IntraSectorGAT(torch.nn.Module):
                 dropout=0.1
             ).to(x.device)
             self.model_registry[in_channels] = conv
-        
 
         conv = self.model_registry[in_channels]
         x = conv(x, edge_index)
@@ -123,52 +143,23 @@ class IntraSectorGAT(torch.nn.Module):
         return x
     
 
-class AttentiveGRU(nn.Module):
-    def __init__(self, input_size, hidden_size):
+class LongTermTransformerLearner(nn.Module):
+    def __init__(self, input_size, hidden_size, lookback_weeks=4, num_layers=2, nhead=4):
         super().__init__()
-        self.gru = nn.GRU(
+        self.lookback = lookback_weeks
+        self.transformer = TransformerSequentialLearner(
             input_size=input_size,
             hidden_size=hidden_size,
-            batch_first=True,
-            bidirectional=False
+            num_layers=num_layers,
+            nhead=nhead
         )
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.Tanh(),
-            nn.Linear(hidden_size, 1, bias=False)
-        )
-
-    def forward(self, x):
-        # x shape: (batch_size, seq_len, input_size)
-        gru_out, _ = self.gru(x)  # (batch_size, seq_len, hidden_size)
-        
-        # Compute attention weights
-        attn_weights = F.softmax(
-            self.attention(gru_out).squeeze(-1), 
-            dim=-1
-        )  # (batch_size, seq_len)
-        
-        # Apply attention
-        context = torch.bmm(
-            attn_weights.unsqueeze(1),  # (batch_size, 1, seq_len)
-            gru_out                     # (batch_size, seq_len, hidden_size)
-        ).squeeze(1)  # (batch_size, hidden_size)
-        
-        return context
-
-class LongTermSequentialLearner(nn.Module):
-    def __init__(self, input_size, hidden_size, lookback_weeks=4):
-        super().__init__()
-        self.lookback = lookback_weeks  # Store the parameter
-        self.attn_gru = AttentiveGRU(input_size, hidden_size)
         
     def forward(self, sequential_embeddings):
 
         seq_window = torch.stack(sequential_embeddings[-self.lookback:], dim=1)
-        
 
-        return self.attn_gru(seq_window)
-
+        context, _ = self.transformer(seq_window)
+        return context
 
 
 class InterSectorGAT(torch.nn.Module):
@@ -194,36 +185,40 @@ class InterSectorGAT(torch.nn.Module):
         return x
 
 class EmbeddingFusion(nn.Module):
-    def __init__(self, attentive_dim, graph_dim, sector_dim, output_dim=16):
+    def __init__(self, attentive_dim, graph_dim, sector_dim, output_dim=64):
         super().__init__()
         self.input_dim = attentive_dim + graph_dim + sector_dim
         self.fusion_layer = nn.Linear(self.input_dim, output_dim)
         
     def forward(self, attentive_emb, graph_emb, sector_emb):
-
+        """
+        Fuses three embedding types into a single representation
+        """
+        # Normalize dimensions
         if graph_emb.dim() > 2:
             graph_emb = graph_emb.squeeze(1)
         if attentive_emb.dim() > 2:
             attentive_emb = attentive_emb.squeeze(1)
         
-
+        # Three-way concatenation
         concatenated = torch.cat([graph_emb, attentive_emb, sector_emb], dim=-1)
-
+        
+        # Apply fusion transformation with ReLU
         fused = F.relu(self.fusion_layer(concatenated))
         
         return fused
     
 class FinGAT(nn.Module):
-    def __init__(self, attentive_dim=16, graph_dim=16, sector_dim=16, hidden_dim=256):
+    def __init__(self, attentive_dim=16, graph_dim=16, sector_dim=16, hidden_dim=64):
         super().__init__()
-        
-   
+
         self.fusion = EmbeddingFusion(
             attentive_dim=attentive_dim,
             graph_dim=graph_dim,
             sector_dim=sector_dim,
             output_dim=hidden_dim
         )
+        
 
         self.return_ratio_layer = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim//2),
@@ -240,39 +235,55 @@ class FinGAT(nn.Module):
     def forward(self, attentive_emb, graph_emb, sector_emb):
 
         fused_embedding = self.fusion(attentive_emb, graph_emb, sector_emb)
-        
 
         return_ratio_pred = self.return_ratio_layer(fused_embedding).squeeze(-1)
         movement_pred = torch.sigmoid(self.movement_layer(fused_embedding)).squeeze(-1)
+
+        return_ratio_pred = return_ratio_pred.view(-1)
+        movement_pred = movement_pred.view(-1)
         
         return return_ratio_pred, movement_pred
     
 class MultiTaskLoss:
     def __init__(self, alpha=0.5):
-
-        self.alpha = alpha 
+        """
+        Multi-task loss without auxiliary return prediction
+        Args:
+            alpha: Weight between ranking loss and movement loss
+        """
+        self.alpha = alpha
         self.bce_loss = nn.BCELoss()
         
     def pairwise_ranking_loss(self, predictions, targets):
-
+        # Same as before
         n = predictions.size(0)
         pairs_i, pairs_j = torch.triu_indices(n, n, offset=1)
-
+        
         pred_diff = predictions[pairs_i] - predictions[pairs_j]
         target_diff = targets[pairs_i] - targets[pairs_j]
-
+        
         target_sign = torch.sign(target_diff)
-
+        
         margin = 0.1
         loss = F.relu(-target_sign * pred_diff + margin)
         
         return loss.mean()
     
     def __call__(self, return_preds, return_targets, move_preds, move_targets):
-
+        """
+        Calculate combined multi-task loss
+        """
+        # Ensure consistent shapes
+        return_preds = return_preds.view(-1)
+        return_targets = return_targets.view(-1)
+        move_preds = move_preds.view(-1)
+        move_targets = move_targets.view(-1)
+        
+        # Calculate main losses
         ranking_loss = self.pairwise_ranking_loss(return_preds, return_targets)
         movement_loss = self.bce_loss(move_preds, move_targets)
         
+        # Combined loss
         combined_loss = self.alpha * ranking_loss + (1 - self.alpha) * movement_loss
         
         return combined_loss, ranking_loss, movement_loss
