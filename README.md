@@ -2,7 +2,7 @@
 
 This repository contains code and resources for stock ranking prediction using the **FinGAT** model and its Transformer-based variant.
 
-📄 **Report Link**: [Project Report](https://www.overleaf.com/read/bckpdknmzhsv#8a4fff)
+📄 **Report Link**: [Project Report](https://www.overleaf.com/read/mnxckyrkmrsz#6a8ec2)
 
 ---
 
